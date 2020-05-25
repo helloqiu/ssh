@@ -93,6 +93,8 @@ func DefaultSessionHandler(srv *Server, conn *gossh.ServerConn, newChan gossh.Ne
 		ptyCb:     srv.PtyCallback,
 		sessReqCb: srv.SessionRequestCallback,
 		ctx:       ctx,
+
+		subsystemHandlers: srv.SubsystemHandlers,
 	}
 	sess.handleRequests(reqs)
 }
@@ -100,22 +102,25 @@ func DefaultSessionHandler(srv *Server, conn *gossh.ServerConn, newChan gossh.Ne
 type session struct {
 	sync.Mutex
 	gossh.Channel
-	conn      *gossh.ServerConn
-	handler   Handler
-	handled   bool
-	exited    bool
-	pty       *Pty
-	winch     chan Window
-	env       []string
-	ptyCb     PtyCallback
-	sessReqCb SessionRequestCallback
-	rawCmd    string
-	ctx       Context
-	sigCh     chan<- Signal
-	sigBuf    []Signal
+
+	conn              *gossh.ServerConn
+	handler           Handler
+	handled           bool
+	exited            bool
+	pty               *Pty
+	winch             chan Window
+	env               []string
+	ptyCb             PtyCallback
+	sessReqCb         SessionRequestCallback
+	rawCmd            string
+	ctx               Context
+	sigCh             chan<- Signal
+	sigBuf            []Signal
+	subsystemHandlers map[string]SubsystemHandler
 }
 
 func (sess *session) Write(p []byte) (n int, err error) {
+	// If change the \n to \r\n, then zmodem(rzsz) will be error
 	if sess.pty != nil {
 		m := len(p)
 		// normalize \n to \r\n when pty is accepted.
@@ -300,6 +305,21 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 			// TODO: option/callback to allow agent forwarding
 			SetAgentRequested(sess.ctx)
 			req.Reply(true, nil)
+		case "subsystem":
+			subname := string(req.Payload[4:])
+			handler, ok := sess.subsystemHandlers[subname]
+			if !ok {
+				req.Reply(false, nil)
+				continue
+			}
+			sess.handled = true
+			req.Reply(true, nil)
+
+			go func() {
+				handler(sess)
+				sess.Exit(0)
+			}()
+
 		default:
 			// TODO: debug log
 			req.Reply(false, nil)
